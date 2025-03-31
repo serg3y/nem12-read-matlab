@@ -1,7 +1,6 @@
-function [T, blocks] = nem12read(file)
+function T = nem12read(files, names)
 % Read NEM12 data files and output data as a table.
-% (Tested only on files with only '200' and '300' codes.)
-%   T = nem12read(file)
+%   T = nem12read(files)
 %
 % Remarks:
 % - NEM12 is a very old CSV format used by SA Power Networks to provide
@@ -11,42 +10,84 @@ function [T, blocks] = nem12read(file)
 % Example:
 %   T = nem12read('sample.csv')
 %
-% NEM12 format description:
-% https://www.energyaustralia.com.au/resources/PDFs/User%20Guide_v3.pdf
+% See also:
+%   https://www.energyaustralia.com.au/resources/PDFs/User%20Guide_v3.pdf
 
-% Please send your sample files to: s3rg3y at hotmail dot com
+% Send issues and sample data files to: s3rg3y at hotmail dot com
+
+% Defaults
+if nargin<2 || isempty(names)
+    names = ["sell" "buy" "tariff"];
+end
+
+% Find raw CSV files
+if isfolder(files)
+    files = fullfile(files, '**', '*.csv'); % Recursive search of a folder
+end
+list = dir(files); % Single file or wildcard
+list = fullfile({list.folder}, {list.name});
+list = list(~endsWith(list, '.fixed.csv')); % Skip processed files
+
+% Read files
+T = cellfun(@(x)nem12read_i(x, names), list, 'UniformOutput', false);
+T = vertcat(T{:});
+
+% Sort on time, remove overlaps
+if ~isempty(T)
+    [~, ind] = unique(T.start);
+    T = T(ind, :);
+end
+end
+
+
+function [T, blocks] = nem12read_i(file, names)
+% Read a single NEM12 file
+
+% Read parquet if it exists
+parquet = strrep(file, '.csv', '.parquet');
+if isfile(parquet)
+    T = parquetread(parquet);
+    return
+end
 
 % Read file contents
 txt = fileread(file);
+txt = regexprep(txt, '(?<=\n)400.*?\n', ''); % Remove '400' lines
 
-% Split text into blocks using '200' code
-txtblocks = regexp([10 txt], '(?<=\n200,).*?(?=\n200|\n900|$)', 'match');
-
-% Extract block header information
+% Extract blocks
+blocks = regexp([10 txt], '(?<=\n200,).*?(?=\n200|\n900|$)', 'match');
 frmt = '(?<nmi>\d+),(?<list>\w+),(?<ch2>\w+),(?<channel>\w+),.*,(?<meter>\d+),(?<unit>\w+),(?<rez>\d+),\n(?<data>.*)';
-blocks = regexp(txtblocks, frmt, 'names');
+blocks = regexp(blocks, frmt, 'names');
 
 % Parse data for each block
-data = cell(size(blocks));
-for k = 1:numel(blocks)
-    data{k} = parseblock(blocks{k}.data, str2double(blocks{k}.rez), blocks{k}.channel);
-end
+T = cellfun(@parseblockdata, blocks, 'UniformOutput', false);
+T = vertcat(T{:});
 
-% Combine parsed data into one table and pivot using 'channel'
-T = cat(1, data{:});
+% Convert each 'channel' into column
 T = unstack(T, 'kwh', 'channel');
+
+% Assign column names
+T.Properties.VariableNames = ["start" names];
+
+% Write parquet for next time
+parquetwrite(parquet, T);
+
+% Write human readable CSV
+writetable(T, regexprep(file, '(?i).csv', '.fixed.csv'));
 end
 
-% Helper function to parse each data block
-function T = parseblock(txt, rez, channel)
-tod = 0 : rez/24/60 : 1 - 0.0001;
-frmt = ['300 %{yyyyMMdd}D' repmat('%f', 1, numel(tod)) '%s%*s%*s%{yyyyMMddHHmmss}D'];
 
-data = textscan(txt, frmt, 'Delimiter', ',', 'CollectOutput', true);
+function T = parseblockdata(block)
+% Convert data in a single block (single channel) into a table
+
+tod = 0 : str2double(block.rez)/24/60 : 1 - 0.0001;
+frmt = ['300 %{yyyyMMdd}D' repmat('%f', 1, numel(tod)) '%s%*s%*s%{yyyyMMddHHmmss}D'];
+data = textscan(block.data, frmt, 'Delimiter', ',', 'CollectOutput', true);
+
+% Make a table
 kwh = reshape(data{2}', [], 1);
 start = reshape((data{1} + tod)', [], 1);
 start.Format = 'yyyy-MM-dd HH:mm';
-
-T = table(start, kwh);
-T.channel(:) = string(channel);
+channel = repmat(string(block.channel), numel(kwh), 1);
+T = table(start, kwh, channel);
 end
