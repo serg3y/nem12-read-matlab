@@ -52,6 +52,11 @@ end
 
 % Read file contents
 txt = fileread(file);
+if ~startsWith(txt, '200,')
+    T = [];
+    warning('Unknown file format: %s\n', file)
+    return % Ensure file has correct format
+end
 txt = regexprep(txt, '(?<=\n)400.*?\n', ''); % Remove '400' lines
 
 % Extract blocks
